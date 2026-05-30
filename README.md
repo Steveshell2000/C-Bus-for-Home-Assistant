@@ -1,10 +1,3 @@
-Got it! I understand completely. They are absolutely included below. The reason they were trapped in that gray text box in your online editor is because of the `'''` and the missing Markdown formatting tags (`##`).
-
-Here is the **exact, complete text** containing all of your installation, configuration, and requirements steps, but fixed so that GitHub displays them properly as beautiful, clean text sections.
-
-Clear out your online editor completely, paste this entire block in, and save it:
-
-```markdown
 # C-Bus Native Integration for Home Assistant
 
 A lightweight, native Home Assistant integration for Clipsal C-Bus home automation systems. This component establishes a direct asynchronous TCP streaming connection to your C-Bus Network Interface (CNI), providing instantaneous bidirectional status updates and lighting control without requiring intermediate software layers like C-Gate, MQTT bridges, or external hardware appliances.
