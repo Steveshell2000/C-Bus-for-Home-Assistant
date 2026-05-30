@@ -16,7 +16,7 @@ class CBusCoordinator(DataUpdateCoordinator):
         self.reader = None
         self.writer = None
         self.is_connected = False
-        self.states = {}
+        self.states = {}  # Tracks running states locally: {group_address: state_bool}
 
     async def connect(self):
         """Establish persistent asynchronous connection."""
@@ -25,6 +25,7 @@ class CBusCoordinator(DataUpdateCoordinator):
             self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
             self.is_connected = True
             
+            # Fire concurrent loops for active tracking and keep-alives
             self.hass.loop.create_task(self._listen_loop())
             self.hass.loop.create_task(self._heartbeat_loop())
         except Exception as err:
@@ -74,9 +75,12 @@ class CBusCoordinator(DataUpdateCoordinator):
                     self.is_connected = False
                     break
 
+                # Parse operational binary payloads (0x38 stands for App 56 Lighting)
                 if len(data) >= 4 and data[1] == 0x38:
                     ga = int(data[2])
                     command = data[3]
+                    
+                    # 0x79 maps to standard ON; 0x01 maps to standard OFF
                     is_on = True if command == 0x79 or command > 0x01 else False
                     
                     self.states[ga] = is_on
@@ -98,6 +102,7 @@ class CBusCoordinator(DataUpdateCoordinator):
             self.writer.write(bytes.fromhex(packet_hex))
             await self.writer.drain()
             
+            # Optimistically push localized state to avoid laggy visual loop responses
             self.states[ga] = turn_on
             self.async_set_updated_data(self.states)
         except Exception as err:

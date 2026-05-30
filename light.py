@@ -1,4 +1,4 @@
-from homeassistant.components.light import LightEntity
+from homeassistant.components.light import ColorMode, LightEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -28,6 +28,10 @@ class CBusLightEntity(CoordinatorEntity, LightEntity):
         self.ga = ga
         self._attr_name = name
         self._attr_unique_id = f"cbus_light_{ga}"
+        
+        # Explicitly declare supported color modes to satisfy strict Core schemas
+        self._attr_supported_color_modes = {ColorMode.ONOFF}
+        self._attr_color_mode = ColorMode.ONOFF
 
     @property
     def is_on(self) -> bool:
