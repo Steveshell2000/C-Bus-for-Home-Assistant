@@ -1,25 +1,43 @@
-from homeassistant.components.light import LightEntity, ColorMode
+from homeassistant.components.light import LightEntity
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-async def async_setup_entry(hass, entry, async_add_entities):
-    coordinator = hass.data["cbus_native"][entry.entry_id]
-    entities = []
-    for ga, name in coordinator.cgl_map.items():
-        entities.append(CBusLight(coordinator, ga, name))
-    async_add_entities(entities)
+from . import DOMAIN
 
-class CBusLight(CoordinatorEntity, LightEntity):
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
+    """Set up C-Bus light entities from a config entry."""
+    data = hass.data[DOMAIN][entry.entry_id]
+    coordinator = data["coordinator"]
+    
+    # Safely look up map arrays using brackets
+    lighting_map = data.get("lighting_map") or data.get("cgl_map", {})
+
+    async_add_entities(
+        CBusLightEntity(coordinator, ga, name)
+        for ga, name in lighting_map.items()
+    )
+
+class CBusLightEntity(CoordinatorEntity, LightEntity):
+    """Representation of an individual C-Bus Light Group Address."""
+
     def __init__(self, coordinator, ga, name):
+        """Initialize the light entity."""
         super().__init__(coordinator)
         self.ga = ga
         self._attr_name = name
-        self._attr_supported_color_modes = {ColorMode.ONOFF}
-        self._attr_color_mode = ColorMode.ONOFF
+        self._attr_unique_id = f"cbus_light_{ga}"
 
     @property
-    def is_on(self):
-        return self._attr_is_on
+    def is_on(self) -> bool:
+        """Return true if the group address state is active."""
+        return self.coordinator.states.get(self.ga, False)
 
-    def _handle_coordinator_update(self) -> None:
-        # Update state if the packet ga matches self.ga
-        self.async_write_ha_state()
+    async def async_turn_on(self, **kwargs) -> None:
+        """Instruct C-Bus network group address to turn ON."""
+        await self.coordinator.send_command(self.ga, True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        """Instruct C-Bus network group address to turn OFF."""
+        await self.coordinator.send_command(self.ga, False)
