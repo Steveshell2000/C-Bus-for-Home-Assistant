@@ -34,14 +34,20 @@ class CBusLightEntity(CoordinatorEntity, LightEntity):
     @property
     def is_on(self) -> bool:
         """Return true if the group address state is active."""
-        ga_data = self.coordinator.states.get(self.ga, {})
-        return ga_data.get("state", False)
+        ga_data = self.coordinator.states.get(self.ga, False)
+        # Robust check: handle both dict states and raw boolean fallbacks
+        if isinstance(ga_data, dict):
+            return ga_data.get("state", False)
+        return bool(ga_data)
 
     @property
     def brightness(self) -> int | None:
         """Return the current brightness level of the light (0-255)."""
-        ga_data = self.coordinator.states.get(self.ga, {})
-        return ga_data.get("brightness", 0)
+        ga_data = self.coordinator.states.get(self.ga, False)
+        # Robust check: handle both dict states and raw boolean fallbacks
+        if isinstance(ga_data, dict):
+            return ga_data.get("brightness", 0)
+        return 255 if bool(ga_data) else 0
 
     async def async_turn_on(self, **kwargs) -> None:
         """Instruct C-Bus network group address to turn ON or set a brightness level."""
