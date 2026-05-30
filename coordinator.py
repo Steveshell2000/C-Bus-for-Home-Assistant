@@ -54,8 +54,8 @@ class CBusCoordinator(DataUpdateCoordinator):
         if self.is_connected and self.writer:
             try:
                 # 05FF007A3800 is the standard C-Bus MMI status query for Application 56 (Lighting)
-                # Checksum for '05FF007A3800' is '49'
-                mmi_query = "\\05FF007A380049g\r"
+                # Mathematical 2's complement checksum for '05FF007A3800' is '4A'
+                mmi_query = "\\05FF007A38004Ag\r"
                 _LOGGER.info("C-Bus Polling: Dispatched global MMI state query onto network.")
                 self.writer.write(mmi_query.encode('ascii'))
                 await self.writer.drain()
@@ -113,15 +113,20 @@ class CBusCoordinator(DataUpdateCoordinator):
                 lines = [line.strip() for line in ascii_data.replace('\n', '\r').split('\r') if line.strip()]
                 
                 for line in lines:
-                    # 1. PARSE GLOBAL MMI STATUS BLOCK RESPONSES (e.g. 863800...)
-                    mmi_idx = line.find("8638")
+                    # 1. PARSE GLOBAL MMI STATUS BLOCK RESPONSES (Look for F638 or 8638)
+                    mmi_idx = -1
+                    for prefix in ["F638", "8638", "f638"]:
+                        found_idx = line.find(prefix)
+                        if found_idx != -1:
+                            mmi_idx = found_idx
+                            break
+
                     if mmi_idx != -1 and len(line) >= mmi_idx + 22:
                         try:
                             # Extract block starting address offset (e.g., "00" for GA 0-31, "20" for GA 32-63)
                             block_start_hex = line[mmi_idx+4 : mmi_idx+6]
                             start_ga = int(block_start_hex, 16)
                             
-                            # Parse 8 subsequent bytes (16 hex characters) of 2-bit state mappings
                             idx_data = mmi_idx + 6
                             state_updated = False
                             
@@ -154,7 +159,7 @@ class CBusCoordinator(DataUpdateCoordinator):
                                         
                             if state_updated:
                                 self.async_set_updated_data(self.states)
-                                _LOGGER.debug("C-Bus Polling: Handled batch MMI status block starting at GA %d", start_ga)
+                                _LOGGER.info("C-Bus Polling: Successfully synced MMI status block starting at GA %d", start_ga)
                             continue
                         except Exception as mmi_err:
                             _LOGGER.debug("Failed parsing MMI line %s: %s", line, mmi_err)
@@ -189,26 +194,29 @@ class CBusCoordinator(DataUpdateCoordinator):
                 break
 
     async def send_command(self, ga: int, turn_on: bool, brightness: int = None):
-        """Build and dispatch an ASCII formatted C-Bus packet with dimming levels."""
+        """Build and dispatch an ASCII formatted C-Bus packet."""
         if not self.is_connected or not self.writer:
             _LOGGER.error("CNI engine currently offline. Command dropped.")
             return
 
         try:
+            # 02 sets an instant transition, which feels perfect on dimming sliders
+            cmd_byte = "02"
             if brightness is not None:
-                # 06 initiates a pleasant 4-second fade to target instead of jumping instantly
-                cmd_byte = "06"
                 level_hex = f"{brightness:02X}"
-                base_hex = f"053800{cmd_byte}{ga:02X}{level_hex}"
-                target_state = brightness > 0
                 target_brightness = brightness
+                target_state = brightness > 0
             else:
-                # Standard toggle controls
-                cmd_byte = "79" if turn_on else "01"
-                base_hex = f"053800{cmd_byte}{ga:02X}"
-                target_state = turn_on
-                target_brightness = 255 if turn_on else 0
+                if turn_on:
+                    level_hex = "FF"
+                    target_brightness = 255
+                    target_state = True
+                else:
+                    level_hex = "00"
+                    target_brightness = 0
+                    target_state = False
 
+            base_hex = f"053800{cmd_byte}{ga:02X}{level_hex}"
             checksum = calculate_cbus_checksum(base_hex)
             cmd_ascii = f"\\{base_hex}{checksum}g\r"
             
