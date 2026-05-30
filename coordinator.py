@@ -29,7 +29,6 @@ class CBusCoordinator(DataUpdateCoordinator):
         self.is_connected = False
         
         # Track states dynamically as dictionary objects containing both state and brightness
-        # e.g., { ga_int: {"state": True, "brightness": 255} }
         self.states = {ga: {"state": False, "brightness": 0} for ga in lighting_map}
 
     async def connect(self):
@@ -114,6 +113,53 @@ class CBusCoordinator(DataUpdateCoordinator):
                 lines = [line.strip() for line in ascii_data.replace('\n', '\r').split('\r') if line.strip()]
                 
                 for line in lines:
+                    # 1. PARSE GLOBAL MMI STATUS BLOCK RESPONSES (e.g. 863800...)
+                    mmi_idx = line.find("8638")
+                    if mmi_idx != -1 and len(line) >= mmi_idx + 22:
+                        try:
+                            # Extract block starting address offset (e.g., "00" for GA 0-31, "20" for GA 32-63)
+                            block_start_hex = line[mmi_idx+4 : mmi_idx+6]
+                            start_ga = int(block_start_hex, 16)
+                            
+                            # Parse 8 subsequent bytes (16 hex characters) of 2-bit state mappings
+                            idx_data = mmi_idx + 6
+                            state_updated = False
+                            
+                            for i in range(8):
+                                char_pair = line[idx_data + i*2 : idx_data + i*2 + 2]
+                                if len(char_pair) < 2:
+                                    break
+                                b = int(char_pair, 16)
+                                
+                                # Extract 4 Group Address states from each byte (2-bits each)
+                                for ga_offset in range(4):
+                                    ga = start_ga + (i * 4) + ga_offset
+                                    state_val = (b >> (ga_offset * 2)) & 0x03
+                                    
+                                    # 0x00 = OFF, 0x01 = ON (0x02 = Error, 0x03 = Unused/Unknown)
+                                    if state_val in (0x00, 0x01) and ga in self.lighting_map:
+                                        is_on = (state_val == 0x01)
+                                        current_brightness = self.states.get(ga, {}).get("brightness", 0)
+                                        
+                                        # Maintain local tracking logic
+                                        if is_on and current_brightness == 0:
+                                            brightness = 255
+                                        elif not is_on:
+                                            brightness = 0
+                                        else:
+                                            brightness = current_brightness
+                                            
+                                        self.states[ga] = {"state": is_on, "brightness": brightness}
+                                        state_updated = True
+                                        
+                            if state_updated:
+                                self.async_set_updated_data(self.states)
+                                _LOGGER.debug("C-Bus Polling: Handled batch MMI status block starting at GA %d", start_ga)
+                            continue
+                        except Exception as mmi_err:
+                            _LOGGER.debug("Failed parsing MMI line %s: %s", line, mmi_err)
+
+                    # 2. PARSE REAL-TIME POINT-TO-POINT FEEDBACK EVENTS (3800...)
                     idx = line.find("3800")
                     if idx != -1 and len(line) >= idx + 8:
                         cmd_hex = line[idx+4:idx+6]
@@ -123,14 +169,13 @@ class CBusCoordinator(DataUpdateCoordinator):
                             ga = int(ga_hex, 16)
                             cmd_byte = int(cmd_hex, 16)
                             
-                            # Check if this is a "Ramp to Level" command (command ends in 0x02)
+                            # Check if command is "Ramp to Level" (lower bits have '2' mask)
                             if (cmd_byte & 0x07) == 0x02 and len(line) >= idx + 10:
                                 level_hex = line[idx+8:idx+10]
                                 level = int(level_hex, 16)
                                 is_on = level > 0
                                 brightness = level
                             else:
-                                # Standard ON/OFF fallbacks
                                 is_on = cmd_hex != "01" and cmd_hex != "02"
                                 brightness = 255 if is_on else 0
                             
@@ -151,14 +196,14 @@ class CBusCoordinator(DataUpdateCoordinator):
 
         try:
             if brightness is not None:
-                # Dimmer ramp level (instant rate = '02')
-                cmd_byte = "02"
+                # 06 initiates a pleasant 4-second fade to target instead of jumping instantly
+                cmd_byte = "06"
                 level_hex = f"{brightness:02X}"
                 base_hex = f"053800{cmd_byte}{ga:02X}{level_hex}"
                 target_state = brightness > 0
                 target_brightness = brightness
             else:
-                # Basic ON/OFF presets
+                # Standard toggle controls
                 cmd_byte = "79" if turn_on else "01"
                 base_hex = f"053800{cmd_byte}{ga:02X}"
                 target_state = turn_on
@@ -172,7 +217,6 @@ class CBusCoordinator(DataUpdateCoordinator):
             self.writer.write(cmd_ascii.encode('ascii'))
             await self.writer.drain()
             
-            # Optimistically update localized state dictionary
             self.states[ga] = {"state": target_state, "brightness": target_brightness}
             self.async_set_updated_data(self.states)
         except Exception as err:
