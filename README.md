@@ -24,7 +24,7 @@ config/
         ├── light.py
         ├── manifest.json
         └── YOUR_PROJECT_FILE.cgl
-
+---
 Installation
 1. File Deployment
 Download or clone this repository.
