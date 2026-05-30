@@ -25,7 +25,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return False
 
     try:
-        # Offload file IO to the executor to prevent freezing the main asynchronous event loop
+        # Offload file IO to the executor to prevent blocking the main event loop
         cgl_data = await hass.async_add_executor_job(load_cgl_file, cgl_path)
     except Exception as err:
         _LOGGER.error("Failed to parse CGL JSON file: %s", err)
@@ -50,7 +50,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.info("CGL Parser: Successfully compiled %d lighting entries.", len(lighting_map))
 
     if not lighting_map:
-        _LOGGER.error("CGL Parser: Completed with 0 entities mapped. Verify your .cgl key structure names match 'networks' -> 'applications' -> 'groups'.")
+        _LOGGER.error("CGL Parser: Completed with 0 entities mapped. Verify your .cgl layout structures.")
 
     host = entry.data.get("host", "192.168.1.20")
     port = entry.data.get("port", 10001)
@@ -58,11 +58,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = CBusCoordinator(hass, host, port, lighting_map)
     await coordinator.connect()
 
-    # Expose both key naming patterns to guarantee backwards compatibility
     hass.data[DOMAIN][entry.entry_id] = {
         "coordinator": coordinator,
-        "lighting_map": lighting_map,
-        "cgl_map": lighting_map
+        "lighting_map": lighting_map
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, ["light"])

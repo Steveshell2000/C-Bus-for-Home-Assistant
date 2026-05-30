@@ -14,21 +14,20 @@ class CBusNativeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(self, user_input=None):
         errors = {}
         
-        # Automatically scan the folder for any available .cgl files
+        # Scan folder for available .cgl configuration files
         dir_path = os.path.dirname(__file__)
         cgl_files = await self.hass.async_add_executor_job(
             lambda: [f for f in os.listdir(dir_path) if f.endswith('.cgl')]
         )
 
         if user_input is not None:
-            # Check if the file actually exists before saving
             selected_file = user_input["cgl_filename"]
             if selected_file in cgl_files or os.path.exists(os.path.join(dir_path, selected_file)):
                 return self.async_create_entry(title=f"C-Bus Network ({user_input['host']})", data=user_input)
             else:
                 errors["base"] = "cgl_not_found"
 
-        # Build UI schema based on whether files were discovered in the folder
+        # Build dynamic UI schema
         if cgl_files:
             DATA_SCHEMA = vol.Schema({
                 vol.Required("host", default="192.168.1.20"): str,
@@ -36,7 +35,6 @@ class CBusNativeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required("cgl_filename", default=cgl_files[0]): vol.In(cgl_files),
             })
         else:
-            # If they haven't dropped a file in yet, show an error and let them type a fallback name
             errors["base"] = "missing_cgl_files"
             DATA_SCHEMA = vol.Schema({
                 vol.Required("host", default="192.168.1.20"): str,

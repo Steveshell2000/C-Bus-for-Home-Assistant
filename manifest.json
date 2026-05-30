@@ -1,7 +1,7 @@
 {
   "domain": "cbus_native",
   "name": "C-Bus Native",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "integration_type": "hub",
   "documentation": "https://github.com/Steveshell2000/C-Bus-for-Home-Assistant",
   "issue_tracker": "https://github.com/Steveshell2000/C-Bus-for-Home-Assistant/issues",

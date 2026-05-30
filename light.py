@@ -10,9 +10,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     """Set up C-Bus light entities from a config entry."""
     data = hass.data[DOMAIN][entry.entry_id]
     coordinator = data["coordinator"]
-    
-    # Safely look up map arrays using brackets
-    lighting_map = data.get("lighting_map") or data.get("cgl_map", {})
+    lighting_map = data["lighting_map"]
 
     async_add_entities(
         CBusLightEntity(coordinator, ga, name)
@@ -29,7 +27,7 @@ class CBusLightEntity(CoordinatorEntity, LightEntity):
         self._attr_name = name
         self._attr_unique_id = f"cbus_light_{ga}"
         
-        # Explicitly declare supported color modes to satisfy strict Core schemas
+        # Declare supported color modes to satisfy core registration validation rules
         self._attr_supported_color_modes = {ColorMode.ONOFF}
         self._attr_color_mode = ColorMode.ONOFF
 
