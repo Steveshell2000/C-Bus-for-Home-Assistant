@@ -1,8 +1,12 @@
 {
   "domain": "cbus_native",
   "name": "C-Bus Native",
-  "documentation": "https://github.com/your-repo",
+  "version": "1.0.0",
+  "integration_type": "hub",
+  "documentation": "https://github.com/Steveshell2000/C-Bus-for-Home-Assistant",
+  "issue_tracker": "https://github.com/Steveshell2000/C-Bus-for-Home-Assistant/issues",
+  "requirements": [],
   "dependencies": [],
-  "codeowners": ["@your-username"],
-  "version": "0.1.0"
+  "codeowners": ["@Steveshell2000"],
+  "config_flow": true
 }
