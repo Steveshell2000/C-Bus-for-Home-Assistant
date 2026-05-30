@@ -17,7 +17,7 @@ def calculate_cbus_checksum(hex_string: str) -> str:
         return "00"
 
 class CBusCoordinator(DataUpdateCoordinator):
-    """Handles raw persistent connection to the C-Bus CNI using the ASCII Protocol."""
+    """Handles persistent connection to C-Bus CNI using ASCII Dimming and MMI Polling."""
 
     def __init__(self, hass: HomeAssistant, host: str, port: int, lighting_map: dict):
         super().__init__(hass, _LOGGER, name="cbus_native_coordinator")
@@ -27,7 +27,10 @@ class CBusCoordinator(DataUpdateCoordinator):
         self.reader = None
         self.writer = None
         self.is_connected = False
-        self.states = {}  # Tracks running states locally: {group_address: state_bool}
+        
+        # Track states dynamically as dictionary objects containing both state and brightness
+        # e.g., { ga_int: {"state": True, "brightness": 255} }
+        self.states = {ga: {"state": False, "brightness": 0} for ga in lighting_map}
 
     async def connect(self):
         """Establish persistent asynchronous connection."""
@@ -39,9 +42,26 @@ class CBusCoordinator(DataUpdateCoordinator):
             # Start background read listener and heartbeat loops
             self.hass.loop.create_task(self._listen_loop())
             self.hass.loop.create_task(self._heartbeat_loop())
+            
+            # Request network-wide MMI status poll after connection stabilizes
+            self.hass.loop.create_task(self._initial_status_poll())
         except Exception as err:
             _LOGGER.error("Failed to establish ASCII stream to CNI: %s", err)
             self.is_connected = False
+
+    async def _initial_status_poll(self):
+        """Request the current status of all group addresses on Application 56 on startup."""
+        await asyncio.sleep(2)  # Wait for socket channels to clear
+        if self.is_connected and self.writer:
+            try:
+                # 05FF007A3800 is the standard C-Bus MMI status query for Application 56 (Lighting)
+                # Checksum for '05FF007A3800' is '49'
+                mmi_query = "\\05FF007A380049g\r"
+                _LOGGER.info("C-Bus Polling: Dispatched global MMI state query onto network.")
+                self.writer.write(mmi_query.encode('ascii'))
+                await self.writer.drain()
+            except Exception as err:
+                _LOGGER.error("Failed sending global MMI status query: %s", err)
 
     async def disconnect(self):
         """Clean connection teardown with a socket cooldown period."""
@@ -50,7 +70,6 @@ class CBusCoordinator(DataUpdateCoordinator):
             try:
                 self.writer.write(b"\r")
                 await self.writer.drain()
-                
                 self.writer.close()
                 await self.writer.wait_closed()
                 _LOGGER.info("Successfully disconnected from C-Bus CNI.")
@@ -59,9 +78,6 @@ class CBusCoordinator(DataUpdateCoordinator):
             finally:
                 self.writer = None
                 self.reader = None
-                
-                # Sleep to let CNI release the single TCP slot
-                _LOGGER.info("Cooldown sleep initiated to prevent CNI port hanging...")
                 await asyncio.sleep(1.5)
 
     async def _heartbeat_loop(self):
@@ -94,10 +110,7 @@ class CBusCoordinator(DataUpdateCoordinator):
                     self.is_connected = False
                     break
 
-                # Decode incoming stream as ASCII characters
                 ascii_data = data.decode('ascii', errors='ignore')
-                
-                # Parse line-by-line
                 lines = [line.strip() for line in ascii_data.replace('\n', '\r').split('\r') if line.strip()]
                 
                 for line in lines:
@@ -108,36 +121,59 @@ class CBusCoordinator(DataUpdateCoordinator):
                         
                         try:
                             ga = int(ga_hex, 16)
-                            # Command 01 is OFF. Command 02 is RAMP TO 0 (OFF). All others are ON.
-                            is_on = cmd_hex != "01" and cmd_hex != "02"
+                            cmd_byte = int(cmd_hex, 16)
                             
-                            self.states[ga] = is_on
+                            # Check if this is a "Ramp to Level" command (command ends in 0x02)
+                            if (cmd_byte & 0x07) == 0x02 and len(line) >= idx + 10:
+                                level_hex = line[idx+8:idx+10]
+                                level = int(level_hex, 16)
+                                is_on = level > 0
+                                brightness = level
+                            else:
+                                # Standard ON/OFF fallbacks
+                                is_on = cmd_hex != "01" and cmd_hex != "02"
+                                brightness = 255 if is_on else 0
+                            
+                            self.states[ga] = {"state": is_on, "brightness": brightness}
                             self.async_set_updated_data(self.states)
-                            _LOGGER.info("C-Bus Sync: Group Address %d (0x%s) updated to %s", ga, ga_hex, "ON" if is_on else "OFF")
+                            _LOGGER.info("C-Bus Sync: GA %d updated -> State: %s, Brightness: %d", ga, "ON" if is_on else "OFF", brightness)
                         except ValueError:
                             continue
             except Exception as err:
                 _LOGGER.error("Error encountered inside serial listener loop: %s", err)
                 break
 
-    async def send_command(self, ga: int, turn_on: bool):
-        """Build and dispatch an ASCII formatted C-Bus packet with checksum."""
+    async def send_command(self, ga: int, turn_on: bool, brightness: int = None):
+        """Build and dispatch an ASCII formatted C-Bus packet with dimming levels."""
         if not self.is_connected or not self.writer:
             _LOGGER.error("CNI engine currently offline. Command dropped.")
             return
 
         try:
-            cmd_byte = "79" if turn_on else "01"
-            base_hex = f"053800{cmd_byte}{ga:02X}"
+            if brightness is not None:
+                # Dimmer ramp level (instant rate = '02')
+                cmd_byte = "02"
+                level_hex = f"{brightness:02X}"
+                base_hex = f"053800{cmd_byte}{ga:02X}{level_hex}"
+                target_state = brightness > 0
+                target_brightness = brightness
+            else:
+                # Basic ON/OFF presets
+                cmd_byte = "79" if turn_on else "01"
+                base_hex = f"053800{cmd_byte}{ga:02X}"
+                target_state = turn_on
+                target_brightness = 255 if turn_on else 0
+
             checksum = calculate_cbus_checksum(base_hex)
             cmd_ascii = f"\\{base_hex}{checksum}g\r"
             
-            _LOGGER.info("C-Bus Control: Sending command -> %s", cmd_ascii.strip())
+            _LOGGER.info("C-Bus Control: Transmitting ASCII -> %s", cmd_ascii.strip())
             
             self.writer.write(cmd_ascii.encode('ascii'))
             await self.writer.drain()
             
-            self.states[ga] = turn_on
+            # Optimistically update localized state dictionary
+            self.states[ga] = {"state": target_state, "brightness": target_brightness}
             self.async_set_updated_data(self.states)
         except Exception as err:
             _LOGGER.error("Failed handling outgoing physical transmission: %s", err)

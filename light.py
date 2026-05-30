@@ -1,4 +1,4 @@
-from homeassistant.components.light import ColorMode, LightEntity
+from homeassistant.components.light import ColorMode, LightEntity, ATTR_BRIGHTNESS
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -18,7 +18,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     )
 
 class CBusLightEntity(CoordinatorEntity, LightEntity):
-    """Representation of an individual C-Bus Light Group Address."""
+    """Representation of an individual DALI/Dimmer C-Bus Light Group Address."""
 
     def __init__(self, coordinator, ga, name):
         """Initialize the light entity."""
@@ -27,18 +27,32 @@ class CBusLightEntity(CoordinatorEntity, LightEntity):
         self._attr_name = name
         self._attr_unique_id = f"cbus_light_{ga}"
         
-        # Declare supported color modes to satisfy core registration validation rules
-        self._attr_supported_color_modes = {ColorMode.ONOFF}
-        self._attr_color_mode = ColorMode.ONOFF
+        # Expose dimming/brightness features to the Home Assistant Frontend
+        self._attr_supported_color_modes = {ColorMode.BRIGHTNESS}
+        self._attr_color_mode = ColorMode.BRIGHTNESS
 
     @property
     def is_on(self) -> bool:
         """Return true if the group address state is active."""
-        return self.coordinator.states.get(self.ga, False)
+        ga_data = self.coordinator.states.get(self.ga, {})
+        return ga_data.get("state", False)
+
+    @property
+    def brightness(self) -> int | None:
+        """Return the current brightness level of the light (0-255)."""
+        ga_data = self.coordinator.states.get(self.ga, {})
+        return ga_data.get("brightness", 0)
 
     async def async_turn_on(self, **kwargs) -> None:
-        """Instruct C-Bus network group address to turn ON."""
-        await self.coordinator.send_command(self.ga, True)
+        """Instruct C-Bus network group address to turn ON or set a brightness level."""
+        brightness = kwargs.get(ATTR_BRIGHTNESS)
+        
+        if brightness is not None:
+            # Set explicit dimming level
+            await self.coordinator.send_command(self.ga, True, brightness=brightness)
+        else:
+            # Default ON
+            await self.coordinator.send_command(self.ga, True)
 
     async def async_turn_off(self, **kwargs) -> None:
         """Instruct C-Bus network group address to turn OFF."""
