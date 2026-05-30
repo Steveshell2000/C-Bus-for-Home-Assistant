@@ -27,11 +27,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return False
 
     lighting_map = {}
-    for network in cgl_data.get("networks", []):
+    
+    # Diagnostic telemetry tracking
+    networks = cgl_data.get("networks", [])
+    _LOGGER.info("CGL Parser: Scanning %d network(s) inside %s", len(networks), cgl_filename)
+
+    for network in networks:
         for app in network.get("applications", []):
-            if app.get("address") == 56:  
-                for group in app.get("groups", []):
-                    lighting_map[int(group["address"])] = group["name"]
+            # Casting to string handles both integer 56 and string "56" layout structures safely
+            if str(app.get("address")) == "56":  
+                groups = app.get("groups", []):
+                _LOGGER.info("CGL Parser: Found Lighting Application (56) containing %d group addresses.", len(groups))
+                for group in groups:
+                    try:
+                        ga = int(group["address"])
+                        lighting_map[ga] = group["name"]
+                    except (KeyError, ValueError) as err:
+                        _LOGGER.warning("CGL Parser: Skipping invalid group item %s: %s", group, err)
+
+    _LOGGER.info("CGL Parser: Successfully compiled %d lighting entries.", len(lighting_map))
+
+    if not lighting_map:
+        _LOGGER.error("CGL Parser: Completed with 0 entities mapped. Verify your .cgl key structure names matches 'networks' -> 'applications' -> 'groups'.")
 
     host = entry.data.get("host", "192.168.1.20")
     port = entry.data.get("port", 10001)
@@ -51,7 +68,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry safely without crashing on missing keys."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, ["light"])
     if unload_ok:
-        # Use .pop with None fallback to prevent KeyError crashes
         data = hass.data[DOMAIN].pop(entry.entry_id, None)
         if data and "coordinator" in data:
             await data["coordinator"].disconnect()
