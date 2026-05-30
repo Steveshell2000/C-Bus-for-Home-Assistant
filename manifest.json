@@ -1,0 +1,8 @@
+{
+  "domain": "cbus_native",
+  "name": "C-Bus Native",
+  "documentation": "https://github.com/your-repo",
+  "dependencies": [],
+  "codeowners": ["@your-username"],
+  "version": "0.1.0"
+}
