@@ -3,6 +3,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.helpers.device_registry import DeviceInfo
 
 from . import DOMAIN
 
@@ -10,32 +11,45 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     """Set up C-Bus light entities from a config entry."""
     data = hass.data[DOMAIN][entry.entry_id]
     coordinator = data["coordinator"]
-    lighting_map = data["lighting_map"]
+    
+    # Safely look up map arrays using brackets
+    lighting_map = data.get("lighting_map") or data.get("cgl_map", {})
 
     async_add_entities(
-        CBusLightEntity(coordinator, ga, name)
+        CBusLightEntity(coordinator, ga, name, entry)
         for ga, name in lighting_map.items()
     )
 
 class CBusLightEntity(CoordinatorEntity, LightEntity):
-    """Representation of an individual DALI/Dimmer C-Bus Light Group Address."""
+    """Representation of an individual C-Bus Light Group Address."""
 
-    def __init__(self, coordinator, ga, name):
+    def __init__(self, coordinator, ga, name, entry: ConfigEntry):
         """Initialize the light entity."""
         super().__init__(coordinator)
         self.ga = ga
         self._attr_name = name
         self._attr_unique_id = f"cbus_light_{ga}"
+        self._entry = entry
         
-        # Expose dimming/brightness features to the Home Assistant Frontend
+        # Declare dimming/brightness capability profile
         self._attr_supported_color_modes = {ColorMode.BRIGHTNESS}
         self._attr_color_mode = ColorMode.BRIGHTNESS
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Link this entity to a parent C-Bus Gateway device."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name="C-Bus Local Gateway",
+            manufacturer="Clipsal",
+            model="Wiser MKII / CNI",
+            sw_version="1.0.1",
+        )
 
     @property
     def is_on(self) -> bool:
         """Return true if the group address state is active."""
         ga_data = self.coordinator.states.get(self.ga, False)
-        # Robust check: handle both dict states and raw boolean fallbacks
         if isinstance(ga_data, dict):
             return ga_data.get("state", False)
         return bool(ga_data)
@@ -44,7 +58,6 @@ class CBusLightEntity(CoordinatorEntity, LightEntity):
     def brightness(self) -> int | None:
         """Return the current brightness level of the light (0-255)."""
         ga_data = self.coordinator.states.get(self.ga, False)
-        # Robust check: handle both dict states and raw boolean fallbacks
         if isinstance(ga_data, dict):
             return ga_data.get("brightness", 0)
         return 255 if bool(ga_data) else 0
