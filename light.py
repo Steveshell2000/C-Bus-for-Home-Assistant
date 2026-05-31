@@ -21,7 +21,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     )
 
 class CBusLightEntity(CoordinatorEntity, LightEntity):
-    """Representation of an individual C-Bus Light Group Address."""
+    """Representation of an individual C-Bus Light Group Address with dimming capabilities."""
 
     def __init__(self, coordinator, ga, name, entry: ConfigEntry):
         """Initialize the light entity."""
@@ -31,7 +31,7 @@ class CBusLightEntity(CoordinatorEntity, LightEntity):
         self._attr_unique_id = f"cbus_light_{ga}"
         self._entry = entry
         
-        # Declare dimming/brightness capability profile
+        # Declare explicit support for Brightness (dimming sliders in Home Assistant UI)
         self._attr_supported_color_modes = {ColorMode.BRIGHTNESS}
         self._attr_color_mode = ColorMode.BRIGHTNESS
 
@@ -49,28 +49,33 @@ class CBusLightEntity(CoordinatorEntity, LightEntity):
     @property
     def is_on(self) -> bool:
         """Return true if the group address state is active."""
-        ga_data = self.coordinator.states.get(self.ga, False)
-        if isinstance(ga_data, dict):
-            return ga_data.get("state", False)
-        return bool(ga_data)
+        # Read directly from the coordinator's updated data dictionary
+        if self.coordinator.data and self.ga in self.coordinator.data:
+            ga_data = self.coordinator.data[self.ga]
+            if isinstance(ga_data, dict):
+                return ga_data.get("state", False)
+            return bool(ga_data)
+        return False
 
     @property
     def brightness(self) -> int | None:
         """Return the current brightness level of the light (0-255)."""
-        ga_data = self.coordinator.states.get(self.ga, False)
-        if isinstance(ga_data, dict):
-            return ga_data.get("brightness", 0)
-        return 255 if bool(ga_data) else 0
+        if self.coordinator.data and self.ga in self.coordinator.data:
+            ga_data = self.coordinator.data[self.ga]
+            if isinstance(ga_data, dict):
+                return ga_data.get("brightness", 0)
+            return 255 if bool(ga_data) else 0
+        return 0
 
     async def async_turn_on(self, **kwargs) -> None:
         """Instruct C-Bus network group address to turn ON or set a brightness level."""
         brightness = kwargs.get(ATTR_BRIGHTNESS)
         
         if brightness is not None:
-            # Set explicit dimming level
+            # Send set explicit level
             await self.coordinator.send_command(self.ga, True, brightness=brightness)
         else:
-            # Default ON
+            # Default Recall / ON
             await self.coordinator.send_command(self.ga, True)
 
     async def async_turn_off(self, **kwargs) -> None:
