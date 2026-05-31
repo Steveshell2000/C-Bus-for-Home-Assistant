@@ -28,11 +28,13 @@ class CBusCoordinator(DataUpdateCoordinator):
         self.writer = None
         self.is_connected = False
         
-        # Track states dynamically as dictionary objects containing both state and brightness
         self.states = {ga: {"state": False, "brightness": 0} for ga in lighting_map}
 
     async def connect(self):
         """Establish persistent asynchronous connection."""
+        if self.is_connected:
+            return
+            
         try:
             _LOGGER.info("Opening raw ASCII connection socket to C-Bus CNI at %s:%s", self.host, self.port)
             self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
@@ -42,35 +44,36 @@ class CBusCoordinator(DataUpdateCoordinator):
             self.hass.loop.create_task(self._listen_loop())
             self.hass.loop.create_task(self._heartbeat_loop())
             
-            # Force status sync with an expanded polling strategy
+            # Force status sync
             self.hass.loop.create_task(self._initial_status_poll())
         except Exception as err:
             _LOGGER.error("Failed to establish ASCII stream to CNI: %s", err)
             self.is_connected = False
+            self.hass.loop.create_task(self._reconnect_later())
+
+    async def _reconnect_later(self):
+        """Wait safely and then trigger a reconnection."""
+        await asyncio.sleep(5)
+        await self.connect()
 
     async def _initial_status_poll(self):
         """Request the current status of all group addresses on Application 56."""
-        await asyncio.sleep(3)  # Wait for socket channels to clear
+        await asyncio.sleep(3)
         if self.is_connected and self.writer:
             try:
-                # Query Application 56 (Lighting)
-                # 05 = Length, FF = Source, 00 = Destination, 7A = MMI Status, 38 = App 56
                 mmi_queries = ["\\05FF007A38004Ag\r", "\\05FF007A382024g\r"]
                 for query in mmi_queries:
-                    _LOGGER.info("C-Bus Polling: Dispatching MMI state query: %s", query.strip())
                     self.writer.write(query.encode('ascii'))
                     await self.writer.drain()
-                    await asyncio.sleep(0.5) # Space out queries for the Wiser internal buffer
+                    await asyncio.sleep(0.5)
             except Exception as err:
                 _LOGGER.error("Failed sending global MMI status query: %s", err)
 
     async def disconnect(self):
-        """Clean connection teardown with a socket cooldown period."""
+        """Clean connection teardown."""
         self.is_connected = False
         if self.writer:
             try:
-                self.writer.write(b"\r")
-                await self.writer.drain()
                 self.writer.close()
                 await self.writer.wait_closed()
             except Exception as err:
@@ -78,10 +81,9 @@ class CBusCoordinator(DataUpdateCoordinator):
             finally:
                 self.writer = None
                 self.reader = None
-                await asyncio.sleep(1.5)
 
     async def _heartbeat_loop(self):
-        """Send standard C-Bus keep-alive carriage return periodically."""
+        """Send keep-alive carriage return periodically."""
         while self.is_connected:
             try:
                 if self.writer:
@@ -94,37 +96,55 @@ class CBusCoordinator(DataUpdateCoordinator):
             await asyncio.sleep(30)
         
         if not self.is_connected:
-            await asyncio.sleep(5)
-            await self.connect()
+            await self.disconnect()
+            self.hass.loop.create_task(self._reconnect_later())
 
     async def _listen_loop(self):
-        """Monitor incoming stream decoding ASCII hex representations."""
+        """Monitor incoming stream with strict error recovery and a TCP buffer."""
+        buffer = ""
         while self.is_connected:
             try:
-                data = await self.reader.read(1024)
-                if not data: break
-
-                ascii_data = data.decode('ascii', errors='ignore')
-                # Split by potential line endings
-                lines = [line.strip() for line in ascii_data.replace('\n', '\r').split('\r') if line.strip()]
+                if not self.reader: break
                 
-                for line in lines:
-                    # Look for F638/8638 (MMI Response)
+                # Use a timeout to ensure the read loop doesn't block indefinitely
+                data = await asyncio.wait_for(self.reader.read(1024), timeout=60.0)
+                if not data: 
+                    _LOGGER.warning("CNI interface closed stream.")
+                    break
+
+                # Add new data to the text buffer
+                buffer += data.decode('ascii', errors='ignore')
+                
+                # Only process complete lines ending in a carriage return
+                while '\r' in buffer:
+                    line, buffer = buffer.split('\r', 1)
+                    line = line.strip()
+                    if not line: continue
+                    
                     if "F638" in line or "8638" in line:
                         self._process_mmi_response(line)
-                    # Look for standard 3800 point-to-point updates
                     elif "3800" in line:
                         self._process_event_update(line)
+            except asyncio.TimeoutError:
+                # Timeout is expected if no traffic happens for 60s, just continue
+                continue
             except Exception as err:
                 _LOGGER.error("Error in listener loop: %s", err)
-                break
+                # Clear corrupted buffer to recover cleanly
+                buffer = ""
+                await asyncio.sleep(1)
+        
+        self.is_connected = False
+        if self.writer:
+            self.hass.loop.create_task(self._reconnect_later())
 
     def _process_mmi_response(self, line):
-        """Parse the hex status block response."""
         try:
-            # Find the start of the hex block
             mmi_idx = line.find("F638")
             if mmi_idx == -1: mmi_idx = line.find("8638")
+            
+            # Bounds checking to prevent loop crashes
+            if mmi_idx == -1 or len(line) < mmi_idx + 22: return
             
             block_start_hex = line[mmi_idx+4 : mmi_idx+6]
             start_ga = int(block_start_hex, 16)
@@ -144,9 +164,11 @@ class CBusCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("MMI Parse error: %s", e)
 
     def _process_event_update(self, line):
-        """Parse point-to-point real-time events."""
         try:
             idx = line.find("3800")
+            # Bounds checking to prevent index out of range crashes
+            if idx == -1 or len(line) < idx + 8: return
+            
             cmd_hex = line[idx+4:idx+6]
             ga_hex = line[idx+6:idx+8]
             ga = int(ga_hex, 16)
@@ -159,7 +181,6 @@ class CBusCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Event Parse error: %s", e)
 
     async def send_command(self, ga: int, turn_on: bool, brightness: int = None):
-        """Build and dispatch an ASCII formatted C-Bus packet."""
         if not self.writer: return
 
         cmd_byte = "02"
@@ -167,9 +188,11 @@ class CBusCoordinator(DataUpdateCoordinator):
         base_hex = f"053800{cmd_byte}{ga:02X}{level_hex}"
         cmd_ascii = f"\\{base_hex}{calculate_cbus_checksum(base_hex)}g\r"
         
-        self.writer.write(cmd_ascii.encode('ascii'))
-        await self.writer.drain()
-        
-        # Update state locally immediately
-        self.states[ga] = {"state": (brightness or 0) > 0 or turn_on, "brightness": brightness or (255 if turn_on else 0)}
-        self.async_set_updated_data(self.states)
+        try:
+            self.writer.write(cmd_ascii.encode('ascii'))
+            await self.writer.drain()
+            self.states[ga] = {"state": (brightness or 0) > 0 or turn_on, "brightness": brightness or (255 if turn_on else 0)}
+            self.async_set_updated_data(self.states)
+        except Exception as e:
+            _LOGGER.error("Failed to write to CNI socket: %s", e)
+            self.is_connected = False
