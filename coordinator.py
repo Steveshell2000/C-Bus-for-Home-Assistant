@@ -27,6 +27,7 @@ class CBusCoordinator(DataUpdateCoordinator):
         self.reader = None
         self.writer = None
         self.is_connected = False
+        self._intentional_disconnect = False
         
         self.states = {ga: {"state": False, "brightness": 0} for ga in lighting_map}
 
@@ -35,6 +36,7 @@ class CBusCoordinator(DataUpdateCoordinator):
         if self.is_connected:
             return
             
+        self._intentional_disconnect = False
         try:
             _LOGGER.info("Opening raw ASCII connection socket to C-Bus CNI at %s:%s", self.host, self.port)
             self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
@@ -49,20 +51,26 @@ class CBusCoordinator(DataUpdateCoordinator):
         except Exception as err:
             _LOGGER.error("Failed to establish ASCII stream to CNI: %s", err)
             self.is_connected = False
-            self.hass.loop.create_task(self._reconnect_later())
+            if not self._intentional_disconnect:
+                self.hass.loop.create_task(self._reconnect_later())
 
     async def _reconnect_later(self):
         """Wait safely and then trigger a reconnection."""
+        if self._intentional_disconnect:
+            return
         await asyncio.sleep(5)
-        await self.connect()
+        if not self._intentional_disconnect:
+            await self.connect()
 
     async def _initial_status_poll(self):
         """Request the current status of all group addresses on Application 56."""
         await asyncio.sleep(3)
-        if self.is_connected and self.writer:
+        if self.is_connected and self.writer and not self._intentional_disconnect:
             try:
                 mmi_queries = ["\\05FF007A38004Ag\r", "\\05FF007A382024g\r"]
                 for query in mmi_queries:
+                    if self._intentional_disconnect:
+                        break
                     self.writer.write(query.encode('ascii'))
                     await self.writer.drain()
                     await asyncio.sleep(0.5)
@@ -70,10 +78,13 @@ class CBusCoordinator(DataUpdateCoordinator):
                 _LOGGER.error("Failed sending global MMI status query: %s", err)
 
     async def disconnect(self):
-        """Clean connection teardown."""
+        """Clean connection teardown preventing background reconnection loops."""
+        self._intentional_disconnect = True
         self.is_connected = False
+        
         if self.writer:
             try:
+                _LOGGER.info("Closing C-Bus socket connection cleanly...")
                 self.writer.close()
                 await self.writer.wait_closed()
             except Exception as err:
@@ -81,10 +92,14 @@ class CBusCoordinator(DataUpdateCoordinator):
             finally:
                 self.writer = None
                 self.reader = None
+        
+        # Enforce a 1.5-second cooldown to let the CNI/Wiser release the TCP socket slot cleanly
+        _LOGGER.info("CNI cooldown complete.")
+        await asyncio.sleep(1.5)
 
     async def _heartbeat_loop(self):
         """Send keep-alive carriage return periodically."""
-        while self.is_connected:
+        while self.is_connected and not self._intentional_disconnect:
             try:
                 if self.writer:
                     self.writer.write(b"\r")
@@ -95,14 +110,14 @@ class CBusCoordinator(DataUpdateCoordinator):
                 break
             await asyncio.sleep(30)
         
-        if not self.is_connected:
+        if not self.is_connected and not self._intentional_disconnect:
             await self.disconnect()
             self.hass.loop.create_task(self._reconnect_later())
 
     async def _listen_loop(self):
         """Monitor incoming stream with strict error recovery and a TCP buffer."""
         buffer = ""
-        while self.is_connected:
+        while self.is_connected and not self._intentional_disconnect:
             try:
                 if not self.reader: break
                 
@@ -116,7 +131,7 @@ class CBusCoordinator(DataUpdateCoordinator):
                 buffer += data.decode('ascii', errors='ignore')
                 
                 # Only process complete lines ending in a carriage return
-                while '\r' in buffer:
+                while '\r' in buffer and not self._intentional_disconnect:
                     line, buffer = buffer.split('\r', 1)
                     line = line.strip()
                     if not line: continue
@@ -126,16 +141,15 @@ class CBusCoordinator(DataUpdateCoordinator):
                     elif "3800" in line:
                         self._process_event_update(line)
             except asyncio.TimeoutError:
-                # Timeout is expected if no traffic happens for 60s, just continue
                 continue
             except Exception as err:
-                _LOGGER.error("Error in listener loop: %s", err)
-                # Clear corrupted buffer to recover cleanly
+                if not self._intentional_disconnect:
+                    _LOGGER.error("Error in listener loop: %s", err)
                 buffer = ""
                 await asyncio.sleep(1)
         
         self.is_connected = False
-        if self.writer:
+        if not self._intentional_disconnect:
             self.hass.loop.create_task(self._reconnect_later())
 
     def _process_mmi_response(self, line):
@@ -181,7 +195,7 @@ class CBusCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Event Parse error: %s", e)
 
     async def send_command(self, ga: int, turn_on: bool, brightness: int = None):
-        if not self.writer: return
+        if not self.writer or self._intentional_disconnect: return
 
         cmd_byte = "02"
         level_hex = f"{brightness:02X}" if brightness is not None else ("FF" if turn_on else "00")
