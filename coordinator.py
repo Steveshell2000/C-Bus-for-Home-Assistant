@@ -8,9 +8,11 @@ from .const import DEFAULT_TRANSITION, MAX_TRANSITION
 from .protocol import (
     LIGHT_OFF,
     LIGHT_ON,
+    LIGHTING_APPLICATION,
+    build_level_status_request,
     build_lighting_command,
-    calculate_cbus_checksum,
     interpolate_ramp_level,
+    parse_level_status_response,
     parse_lighting_event,
     ramp_command_for_transition,
     ramp_duration_seconds,
@@ -19,6 +21,9 @@ from .protocol import (
 _LOGGER = logging.getLogger(__name__)
 
 RAMP_UPDATE_INTERVAL = 0.25
+MMI_SETTLE_SECONDS = 3.5
+STATUS_REQUEST_INTERVAL = 0.25
+STATUS_RESPONSE_TIMEOUT = 5.0
 
 
 class CBusCoordinator(DataUpdateCoordinator):
@@ -53,6 +58,14 @@ class CBusCoordinator(DataUpdateCoordinator):
         # physical fade instead of jumping directly to the terminal level.
         self._ramp_tasks: dict[int, asyncio.Task] = {}
         self._active_ramps: dict[int, dict[str, float | int]] = {}
+        self._mmi_ignore_until: dict[int, float] = {}
+
+        # Exact level status is requested in 32-group blocks before entities are
+        # exposed. This prevents Home Assistant from showing restored/stale
+        # brightness values after an integration or host restart.
+        self._initial_status_pending: set[int] = set()
+        self._initial_status_event = asyncio.Event()
+        self.initial_sync_complete = False
 
     async def connect(self):
         """Establish persistent asynchronous connection with the gateway."""
@@ -84,10 +97,11 @@ class CBusCoordinator(DataUpdateCoordinator):
                 await self.writer.drain()
                 await asyncio.sleep(0.3)
 
-            # Spin up managed background loops.
+            # Start listening before requesting exact status so replies cannot be
+            # missed. Entity setup waits for this initial live-state pass.
             self._tasks.append(self.hass.loop.create_task(self._listen_loop()))
             self._tasks.append(self.hass.loop.create_task(self._heartbeat_loop()))
-            self._tasks.append(self.hass.loop.create_task(self._sync_loop()))
+            await self._sync_initial_levels()
             _LOGGER.info(
                 "C-Bus Connection: Fully initialized and background loops started."
             )
@@ -108,30 +122,56 @@ class CBusCoordinator(DataUpdateCoordinator):
         if not self._intentional_disconnect:
             await self.connect()
 
-    async def _sync_loop(self):
-        """Paced query loop to safely sync all group states on startup."""
+    async def _sync_initial_levels(self):
+        """Request exact live levels in 32-group blocks before entity setup."""
+        blocks = sorted({ga & 0xE0 for ga in self.lighting_map})
         _LOGGER.info(
-            "C-Bus Sync: Initiating paced startup status poll for %d groups...",
+            "C-Bus Sync: Requesting exact startup levels for %d groups in %d blocks...",
             len(self.lighting_map),
+            len(blocks),
         )
-        await asyncio.sleep(3)
+        self.initial_sync_complete = False
+        self._initial_status_pending = set(blocks)
+        self._initial_status_event.clear()
 
-        for ga in self.lighting_map:
+        for start_group in blocks:
             if not self.is_connected or self._intentional_disconnect:
                 break
             try:
-                # Command 03 is the standard CAL Status Request for a specific GA.
-                base_hex = f"05380003{ga:02X}"
-                cmd = f"\\{base_hex}{calculate_cbus_checksum(base_hex)}g\r"
-                self.writer.write(cmd.encode("ascii"))
+                command = build_level_status_request(start_group)
+                self.writer.write(command.encode("ascii"))
                 await self.writer.drain()
-                _LOGGER.debug("C-Bus Sync: Polled GA %d (Hex: %s)", ga, base_hex)
-                await asyncio.sleep(0.15)
+                _LOGGER.debug(
+                    "C-Bus Sync: Requested exact level block at GA %d", start_group
+                )
+                await asyncio.sleep(STATUS_REQUEST_INTERVAL)
             except Exception as err:
-                _LOGGER.error("C-Bus Sync: Poll aborted for GA %d: %s", ga, err)
+                _LOGGER.error(
+                    "C-Bus Sync: Exact level request aborted at GA %d: %s",
+                    start_group,
+                    err,
+                )
                 break
 
-        _LOGGER.info("C-Bus Sync: Startup polling sequence complete.")
+        if self._initial_status_pending and self.is_connected:
+            try:
+                await asyncio.wait_for(
+                    self._initial_status_event.wait(),
+                    timeout=STATUS_RESPONSE_TIMEOUT,
+                )
+            except TimeoutError:
+                _LOGGER.warning(
+                    "C-Bus Sync: Timed out waiting for exact level blocks: %s",
+                    sorted(self._initial_status_pending),
+                )
+
+        self.initial_sync_complete = True
+        self.async_set_updated_data(dict(self.states))
+        _LOGGER.info(
+            "C-Bus Sync: Startup live-state pass complete (%d/%d blocks received).",
+            len(blocks) - len(self._initial_status_pending),
+            len(blocks),
+        )
 
     async def disconnect(self):
         """Gracefully close sockets and cancel active tasks."""
@@ -149,6 +189,10 @@ class CBusCoordinator(DataUpdateCoordinator):
                 task.cancel()
         self._ramp_tasks.clear()
         self._active_ramps.clear()
+        self._mmi_ignore_until.clear()
+        self._initial_status_pending.clear()
+        self._initial_status_event.clear()
+        self.initial_sync_complete = False
 
         if self.writer:
             try:
@@ -208,6 +252,8 @@ class CBusCoordinator(DataUpdateCoordinator):
 
                     _LOGGER.debug("C-Bus Listener: Raw line received: %s", line)
                     try:
+                        if self._process_level_status_response(line):
+                            continue
                         if self._process_event_update(line):
                             continue
                         if any(
@@ -252,12 +298,21 @@ class CBusCoordinator(DataUpdateCoordinator):
                 byte_data = int(byte_hex, 16)
                 for ga_offset in range(4):
                     ga = start_ga + (index * 4) + ga_offset
-                    if ga not in self.lighting_map or ga in self._active_ramps:
+                    if (
+                        ga not in self.lighting_map
+                        or ga in self._active_ramps
+                        or self._mmi_is_held(ga)
+                    ):
                         continue
 
                     shift = ga_offset * 2
                     state_val = (byte_data >> shift) & 0x03
-                    is_on = state_val in (0x01, 0x03)
+                    # 00 means the group does not exist and 11 means the MMI
+                    # result is invalid. Neither is an OFF status. Treat only the
+                    # two documented binary values as state feedback.
+                    if state_val not in (0x01, 0x02):
+                        continue
+                    is_on = state_val == 0x01
 
                     current_brightness = self.states[ga].get("brightness", 0)
                     if is_on:
@@ -280,6 +335,35 @@ class CBusCoordinator(DataUpdateCoordinator):
         except Exception as err:
             _LOGGER.error("C-Bus MMI: Parsing failure: %s", err)
 
+    def _process_level_status_response(self, line: str) -> bool:
+        """Apply one exact 32-group level-status response."""
+        block = parse_level_status_response(line)
+        if block is None or block.application != LIGHTING_APPLICATION:
+            return False
+
+        state_updated = False
+        for ga, level in block.levels.items():
+            if (
+                ga not in self.states
+                or ga in self._active_ramps
+                or self._mmi_is_held(ga)
+            ):
+                continue
+            self.states[ga] = {"state": level > 0, "brightness": level}
+            state_updated = True
+
+        self._initial_status_pending.discard(block.start_group)
+        if not self._initial_status_pending:
+            self._initial_status_event.set()
+
+        if state_updated:
+            self.async_set_updated_data(dict(self.states))
+            _LOGGER.debug(
+                "C-Bus Sync: Applied exact level block starting at GA %d",
+                block.start_group,
+            )
+        return True
+
     def _process_event_update(self, line: str) -> bool:
         """Handle ON, OFF, ramp-to-level, and terminate-ramp telegrams."""
         event = parse_lighting_event(line)
@@ -290,6 +374,7 @@ class CBusCoordinator(DataUpdateCoordinator):
         if event.command == "terminate":
             level = self._estimated_ramp_level(ga)
             self._cancel_ramp(ga)
+            self._hold_mmi(ga)
             self._publish_level(ga, level)
             _LOGGER.info("C-Bus Event Sync: GA %d -> Ramp terminated at %d", ga, level)
             return True
@@ -308,6 +393,7 @@ class CBusCoordinator(DataUpdateCoordinator):
 
         assert event.target_level is not None
         self._cancel_ramp(ga)
+        self._hold_mmi(ga)
         self._publish_level(ga, event.target_level)
         _LOGGER.info(
             "C-Bus Event Sync: GA %d -> State: %s, Brightness: %d",
@@ -322,6 +408,7 @@ class CBusCoordinator(DataUpdateCoordinator):
         start_level = self._estimated_ramp_level(ga)
         self._cancel_ramp(ga)
         duration = ramp_duration_seconds(command, start_level, target_level)
+        self._hold_mmi(ga, duration + MMI_SETTLE_SECONDS)
 
         if duration <= 0 or start_level == target_level:
             self._publish_level(ga, target_level)
@@ -365,6 +452,9 @@ class CBusCoordinator(DataUpdateCoordinator):
     def _ramp_task_finished(self, ga: int, task: asyncio.Task) -> None:
         """Remove completed ramp bookkeeping without disturbing a replacement ramp."""
         if self._ramp_tasks.get(ga) is task:
+            ramp = self._active_ramps.get(ga)
+            if ramp and not task.cancelled() and task.exception() is None:
+                self._publish_level(ga, int(ramp["target_level"]))
             self._ramp_tasks.pop(ga, None)
             self._active_ramps.pop(ga, None)
 
@@ -388,6 +478,20 @@ class CBusCoordinator(DataUpdateCoordinator):
         self._active_ramps.pop(ga, None)
         if task and not task.done():
             task.cancel()
+
+    def _hold_mmi(self, ga: int, duration: float = MMI_SETTLE_SECONDS) -> None:
+        """Ignore coarse MMI feedback until a known command has settled."""
+        self._mmi_ignore_until[ga] = self.hass.loop.time() + max(0.0, duration)
+
+    def _mmi_is_held(self, ga: int) -> bool:
+        """Return whether delayed binary feedback must not replace an exact level."""
+        ignore_until = self._mmi_ignore_until.get(ga)
+        if ignore_until is None:
+            return False
+        if self.hass.loop.time() < ignore_until:
+            return True
+        self._mmi_ignore_until.pop(ga, None)
+        return False
 
     def _publish_level(self, ga: int, brightness: int) -> None:
         """Publish one clamped group level through DataUpdateCoordinator."""
@@ -437,6 +541,7 @@ class CBusCoordinator(DataUpdateCoordinator):
 
             if ramp_command is None:
                 self._cancel_ramp(ga)
+                self._hold_mmi(ga)
                 self._publish_level(ga, target_level)
             else:
                 self._start_ramp(ga, target_level, ramp_command)

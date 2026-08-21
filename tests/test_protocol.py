@@ -7,10 +7,13 @@ import unittest
 from protocol import (
     LIGHT_OFF,
     LIGHT_ON,
+    LEVEL_STATUS_NIBBLE_CODES,
     TERMINATE_RAMP,
+    build_level_status_request,
     build_lighting_command,
     calculate_cbus_checksum,
     interpolate_ramp_level,
+    parse_level_status_response,
     parse_lighting_event,
     ramp_command_for_transition,
     ramp_duration_seconds,
@@ -20,6 +23,18 @@ from protocol import (
 def _received_frame(*data: int) -> str:
     checksum = (-sum(data)) & 0xFF
     return "".join(f"{byte:02X}" for byte in (*data, checksum))
+
+
+def _level_status_frame(start_group: int, levels: list[int]) -> str:
+    data = [0x86, 0xFE, 0xFE, 0x00, 0xF7, 0x07, 0x38, start_group]
+    for level in levels:
+        data.extend(
+            (
+                LEVEL_STATUS_NIBBLE_CODES[level & 0x0F],
+                LEVEL_STATUS_NIBBLE_CODES[level >> 4],
+            )
+        )
+    return _received_frame(*data)
 
 
 class ProtocolTests(unittest.TestCase):
@@ -38,6 +53,16 @@ class ProtocolTests(unittest.TestCase):
                 self.assertEqual(
                     build_lighting_command(0x88, command, target), expected
                 )
+
+    def test_build_level_status_request(self) -> None:
+        self.assertEqual(
+            build_level_status_request(0), "\\05FF00730738004Ag\r"
+        )
+        self.assertEqual(
+            build_level_status_request(0x20), "\\05FF00730738202Ag\r"
+        )
+        with self.assertRaises(ValueError):
+            build_level_status_request(1)
 
     def test_transition_is_scaled_for_actual_brightness_delta(self) -> None:
         self.assertEqual(ramp_command_for_transition(4, 0, 255), 0x0A)
@@ -120,6 +145,34 @@ class ProtocolTests(unittest.TestCase):
                 _received_frame(0x05, 0x23, 0x38, 0x00, 0x7B, 0x88)
             )
         )
+
+    def test_parse_exact_level_status_block(self) -> None:
+        expected = [0, 1, 17, 64, 127, 128, 200, 254, 255]
+        block = parse_level_status_response(_level_status_frame(0x20, expected))
+
+        self.assertIsNotNone(block)
+        assert block is not None
+        self.assertEqual(block.application, 0x38)
+        self.assertEqual(block.start_group, 0x20)
+        self.assertEqual(
+            block.levels,
+            {0x20 + index: level for index, level in enumerate(expected)},
+        )
+
+    def test_level_status_skips_invalid_pairs_and_bad_checksum(self) -> None:
+        frame = _level_status_frame(0, [10, 20, 30])
+        invalid_pair = frame[:20] + "00" + frame[22:]
+        checksum = calculate_cbus_checksum(invalid_pair[:-2])
+        invalid_pair = invalid_pair[:-2] + checksum
+
+        block = parse_level_status_response(invalid_pair)
+        self.assertIsNotNone(block)
+        assert block is not None
+        self.assertNotIn(1, block.levels)
+        self.assertEqual(block.levels[0], 10)
+        self.assertEqual(block.levels[2], 30)
+
+        self.assertIsNone(parse_level_status_response(frame[:-2] + "00"))
 
 
 if __name__ == "__main__":

@@ -7,9 +7,9 @@ A lightweight, native Home Assistant integration for Clipsal C-Bus home automati
 * **Direct CNI streaming:** Connects natively to the CNI over a persistent TCP socket.
 * **Dynamic CGL parsing:** Finds exported C-Bus Toolkit `.cgl` project files and exposes them in the setup flow.
 * **Automatic entity discovery:** Creates Home Assistant lights from Application 56 group addresses.
-* **Native C-Bus ramps:** Supports the documented ramp rates, explicit Home Assistant transitions, and smooth slider state updates while a ramp is running.
+* **Native C-Bus ramps:** Supports the documented ramp rates, explicit Home Assistant transitions, and smooth slider state updates while a ramp is running without losing the terminal level to delayed MMI feedback.
 * **Editable default ramp:** Home Assistant lighting commands use a 4-second ramp by default. Change it from the integration's **Configure** page, or set it to `0` for instantaneous control.
-* **Connection hardening:** Includes heartbeat and startup status synchronization.
+* **Connection hardening:** Includes heartbeat and an exact-level startup sync in 32-group C-Bus blocks, completed before Home Assistant exposes the entities.
 * **Graceful lifecycle management:** Disconnects background tasks and the socket cleanly when the entry unloads or reloads.
 
 ## Directory structure
