@@ -120,6 +120,26 @@ class CoordinatorRampTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(writer.frames, [b"\\0538001201FFB1g\r"])
         self.assertIn(1, self.coordinator._active_ramps)
 
+    async def test_default_transition_is_used_when_ha_omits_it(self) -> None:
+        writer = _FakeWriter()
+        self.coordinator.writer = writer
+
+        await self.coordinator.send_command(1, True, brightness=255)
+
+        self.assertEqual(writer.frames, [b"\\0538000A01FFB9g\r"])
+        self.assertIn(1, self.coordinator._active_ramps)
+
+    async def test_explicit_zero_transition_overrides_default(self) -> None:
+        writer = _FakeWriter()
+        self.coordinator.writer = writer
+
+        await self.coordinator.send_command(
+            1, True, brightness=255, transition=0
+        )
+
+        self.assertEqual(writer.frames, [b"\\0538000201FFC1g\r"])
+        self.assertNotIn(1, self.coordinator._active_ramps)
+
 
 if __name__ == "__main__":
     unittest.main()

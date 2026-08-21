@@ -4,6 +4,7 @@ import logging
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
+from .const import DEFAULT_TRANSITION, MAX_TRANSITION
 from .protocol import (
     LIGHT_OFF,
     LIGHT_ON,
@@ -23,11 +24,21 @@ RAMP_UPDATE_INTERVAL = 0.25
 class CBusCoordinator(DataUpdateCoordinator):
     """Handles persistent connection and lifecycle status sync for C-Bus CNIs."""
 
-    def __init__(self, hass: HomeAssistant, host: str, port: int, lighting_map: dict):
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        host: str,
+        port: int,
+        lighting_map: dict,
+        default_transition: float | int = DEFAULT_TRANSITION,
+    ):
         super().__init__(hass, _LOGGER, name="cbus_native_coordinator")
         self.host = host
         self.port = port
         self.lighting_map = lighting_map
+        self.default_transition = min(
+            MAX_TRANSITION, max(0.0, float(default_transition))
+        )
         self.reader = None
         self.writer = None
         self.is_connected = False
@@ -396,7 +407,10 @@ class CBusCoordinator(DataUpdateCoordinator):
             return
 
         start_level = self._estimated_ramp_level(ga)
-        has_transition = transition is not None and float(transition) > 0
+        effective_transition = (
+            self.default_transition if transition is None else float(transition)
+        )
+        has_transition = effective_transition > 0
 
         if brightness is not None or has_transition:
             target_level = (
@@ -405,7 +419,7 @@ class CBusCoordinator(DataUpdateCoordinator):
                 else (255 if turn_on else 0)
             )
             ramp_command = ramp_command_for_transition(
-                transition, start_level, target_level
+                effective_transition, start_level, target_level
             )
             command_ascii = build_lighting_command(
                 ga, ramp_command, target_level=target_level
