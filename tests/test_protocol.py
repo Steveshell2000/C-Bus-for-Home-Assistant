@@ -159,6 +159,15 @@ class ProtocolTests(unittest.TestCase):
             {0x20 + index: level for index, level in enumerate(expected)},
         )
 
+    def test_parse_level_status_after_same_line_acknowledgement(self) -> None:
+        frame = _level_status_frame(0, [0, 42, 137, 255])
+
+        block = parse_level_status_response(f"g.\\{frame}\r")
+
+        self.assertIsNotNone(block)
+        assert block is not None
+        self.assertEqual(block.levels, {0: 0, 1: 42, 2: 137, 3: 255})
+
     def test_level_status_skips_invalid_pairs_and_bad_checksum(self) -> None:
         frame = _level_status_frame(0, [10, 20, 30])
         invalid_pair = frame[:20] + "00" + frame[22:]

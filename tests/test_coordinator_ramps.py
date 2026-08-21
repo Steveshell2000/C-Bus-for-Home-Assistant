@@ -188,7 +188,7 @@ class CoordinatorRampTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(
             self.coordinator._process_level_status_response(
-                _level_status_frame(0, levels)
+                f"g.\\{_level_status_frame(0, levels)}"
             )
         )
 

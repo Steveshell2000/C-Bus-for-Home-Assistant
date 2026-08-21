@@ -213,7 +213,9 @@ def parse_lighting_event(line: str) -> LightingEvent | None:
     ``...380100...``. Frames with an invalid checksum or an unsupported command
     are ignored.
     """
-    match = re.match(r"[0-9A-F]+", line.strip().upper().lstrip("\\"))
+    # A PCI/CNI may prepend the command acknowledgement to a monitored frame
+    # on the same CR-delimited line (for example ``g.05...``).
+    match = re.search(r"[0-9A-F]+", line.strip().upper().lstrip("\\"))
     if not match:
         return None
 
@@ -283,7 +285,10 @@ def parse_level_status_response(line: str) -> LevelStatusBlock | None:
     unwrapped form is accepted too, which makes captured serial frames usable.
     Invalid nibble pairs represent unavailable groups and are omitted.
     """
-    match = re.match(r"[0-9A-F]+", line.strip().upper().lstrip("\\"))
+    # Status replies commonly follow their acknowledgement on the same line,
+    # for example ``g.86FEFE00F907...``. Search for the hexadecimal frame
+    # instead of requiring it at character zero.
+    match = re.search(r"[0-9A-F]+", line.strip().upper().lstrip("\\"))
     if not match:
         return None
 
