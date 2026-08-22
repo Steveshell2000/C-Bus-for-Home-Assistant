@@ -1,18 +1,21 @@
 # C-Bus Native Integration for Home Assistant
 
-A lightweight, native Home Assistant integration for Clipsal C-Bus home automation systems. This component establishes a direct asynchronous TCP streaming connection to your C-Bus Network Interface (CNI), providing instantaneous bidirectional status updates and lighting control without requiring intermediate software layers like C-Gate, MQTT bridges, or external hardware appliances.
+A lightweight, native Home Assistant integration for Clipsal C-Bus home automation systems. This component establishes a direct asynchronous TCP streaming connection to your C-Bus Network Interface (CNI), providing bidirectional status updates and lighting control without requiring C-Gate, MQTT bridges, or an external appliance.
 
 ## Features
 
-* **Direct CNI Streaming:** Bypasses middleman software by connecting natively to your CNI via raw TCP sockets.
-* **Dynamic CGL Project Parsing:** Scans the local integration directory automatically for any exported C-Bus Toolkit `.cgl` project files and exposes them via a user-friendly setup dropdown.
-* **Automatic Entity Discovery:** Dynamically parses Application 56 (Lighting) group addresses from your configuration file to provision distinct Home Assistant light entities automatically.
-* **Connection Hardening:** Built-in polling heartbeat sequence designed to mitigate aggressive CNI server timeouts and protect against socket hangs.
-* **Graceful Lifecycle Management:** Defensively insulated against startup initialization faults to guarantee clean unloading states inside the Home Assistant Core ecosystem.
+* **Direct CNI streaming:** Connects natively to the CNI over a persistent TCP socket.
+* **Dynamic CGL parsing:** Finds exported C-Bus Toolkit `.cgl` project files and exposes them in the setup flow.
+* **Automatic entity discovery:** Creates Home Assistant lights from Application 56 group addresses.
+* **Native C-Bus ramps:** Supports the documented ramp rates, explicit Home Assistant transitions, and smooth slider state updates while a ramp is running without losing the terminal level to delayed MMI feedback.
+* **Editable default ramp:** Home Assistant lighting commands use a 4-second ramp by default. Change it from the integration's **Configure** page, or set it to `0` for instantaneous control.
+* **Connection hardening:** Includes heartbeat and an exact-level startup sync in 32-group C-Bus blocks, completed before Home Assistant exposes the entities.
+* **Legacy gateway state:** If a group does not answer the startup level request, as occurs with the one-way 5500DAL DALI gateway, the entity restores its last observed Home Assistant level as assumed state. Any later C-Bus command or valid output-unit status replaces it immediately.
+* **Graceful lifecycle management:** Disconnects background tasks and the socket cleanly when the entry unloads or reloads.
 
-## Directory Structure
+## Directory structure
 
-To work properly, your custom component folder must be laid out as follows:
+Place the integration files in `config/custom_components/cbus_native/`:
 
 ```text
 config/
@@ -20,64 +23,40 @@ config/
     └── cbus_native/
         ├── __init__.py
         ├── config_flow.py
+        ├── const.py
         ├── coordinator.py
         ├── light.py
         ├── manifest.json
+        ├── protocol.py
+        ├── strings.json
+        ├── translations/
+        │   └── en.json
         └── YOUR_PROJECT_FILE.cgl
-
 ```
-
----
 
 ## Installation
 
-### 1. File Deployment
-
-Download or clone this repository.
-
-Copy the `cbus_native` folder into your Home Assistant installation's `custom_components/` directory.
-
-### 2. Add Your C-Bus Project File
-
-Open your Clipsal C-Bus Toolkit software.
-
-Export your project database as a `.cgl` file (File > Export or right-click the project tag).
-
-Copy your exported `.cgl` file directly into the `custom_components/cbus_native/` directory on your Home Assistant server.
-
-Restart Home Assistant to allow the backend engine to discover the new custom integration and parse the file.
-
----
+1. Download or clone this repository.
+2. Copy its files into `config/custom_components/cbus_native/` in your Home Assistant installation.
+3. Export your project database from C-Bus Toolkit as a `.cgl` file and copy it into the same directory.
+4. Restart Home Assistant.
 
 ## Configuration
 
-In the Home Assistant user interface, navigate to **Settings** > **Devices & Services**.
+1. In Home Assistant, go to **Settings** > **Devices & services**.
+2. Select **+ Add integration**, search for **C-Bus Native**, and open it.
+3. Enter the CNI host and port, choose the CGL project file, and leave **Default ramp time** at `4 s` or select another value.
+4. Submit the form. Lighting entities are created automatically.
 
-Click **+ Add Integration** in the bottom right-hand corner.
+To change the default later, go to **Settings** > **Devices & services**, find **C-Bus Native**, and select **Configure**. Saving the option reloads the integration so the change takes effect immediately.
 
-Search for **"C-Bus Native"** and select it.
-
-Enter your configuration parameters in the setup form:
-
-* **Host:** The static IP address of your C-Bus Network Interface (CNI) (e.g., 192.168.1.20).
-* **Port:** The TCP communication port (default: 10001).
-* **CGL Filename:** Select your discovered project file from the dropdown menu.
-
-Click **Submit**. Your lighting entities will be discovered and generated automatically on your dashboard.
-
----
+The default applies to dashboard controls, including Mushroom light-card brightness sliders. You do not add a ramp field to the Mushroom card YAML. A `transition` supplied by a Home Assistant service call, script, or automation overrides the integration default for that command.
 
 ## Requirements
 
-* Clipsal C-Bus Network Interface (CNI) or equivalent serial-to-IP interface configured with a static IP address.
-* An exported configuration database file matching standard `.cgl` JSON formatting protocols.
-
----
+* Clipsal C-Bus Network Interface (CNI), or an equivalent serial-to-IP interface, configured with a static IP address.
+* An exported C-Bus project file using the standard `.cgl` JSON structure.
 
 ## Credits
 
-Developed and maintained by [@Steveshell2000](https://www.google.com/search?q=https://github.com/Steveshell2000). Contributions and feedback from the home automation community are welcome.
-
-```
-
-```
+Developed and maintained by [@Steveshell2000](https://github.com/Steveshell2000). Contributions and feedback from the home automation community are welcome.

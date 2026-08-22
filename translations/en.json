@@ -1,0 +1,37 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to C-Bus",
+        "description": "Connect to the CNI and select the exported C-Bus project.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "cgl_filename": "CGL project file",
+          "default_transition": "Default ramp time"
+        },
+        "data_description": {
+          "default_transition": "Seconds used when a Home Assistant command does not provide a transition. Set to 0 for instantaneous control."
+        }
+      }
+    },
+    "error": {
+      "cgl_not_found": "The selected CGL project file was not found.",
+      "missing_cgl_files": "No CGL project files were found in the integration directory."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "C-Bus lighting options",
+        "description": "Configure the default ramp used by Home Assistant lighting controls.",
+        "data": {
+          "default_transition": "Default ramp time"
+        },
+        "data_description": {
+          "default_transition": "Seconds. Set to 0 for instantaneous control. A transition supplied by a service call or automation overrides this default."
+        }
+      }
+    }
+  }
+}
