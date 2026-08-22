@@ -70,11 +70,12 @@ class LightingEvent:
 
 @dataclass(frozen=True, slots=True)
 class LevelStatusBlock:
-    """Exact levels returned for one 32-group C-Bus status block."""
+    """Exact levels returned in one fragment of a C-Bus status request."""
 
     application: int
     start_group: int
     levels: dict[int, int]
+    group_count: int
 
 
 def calculate_cbus_checksum(hex_string: str) -> str:
@@ -318,18 +319,23 @@ def parse_level_status_response(line: str) -> LevelStatusBlock | None:
 
     application = cal[2]
     start_group = cal[3]
-    if start_group > 0xE0 or start_group % 0x20:
+    if start_group > 0xFE:
         return None
 
-    encoded_levels = cal[4:68]
+    # A single 32-group request is normally returned as several smaller
+    # fragments. Their start groups are not block-aligned (for example
+    # 00/0B/16 for a request starting at 00).
+    max_groups = 0xFF - start_group
+    encoded_levels = cal[4 : 4 + (min(32, max_groups) * 2)]
+    group_count = len(encoded_levels) // 2
     levels: dict[int, int] = {}
-    for index in range(0, len(encoded_levels) - 1, 2):
-        low = _LEVEL_STATUS_NIBBLES.get(encoded_levels[index])
-        high = _LEVEL_STATUS_NIBBLES.get(encoded_levels[index + 1])
+    for index in range(group_count):
+        low = _LEVEL_STATUS_NIBBLES.get(encoded_levels[index * 2])
+        high = _LEVEL_STATUS_NIBBLES.get(encoded_levels[(index * 2) + 1])
         if low is not None and high is not None:
-            levels[start_group + (index // 2)] = low | (high << 4)
+            levels[start_group + index] = low | (high << 4)
 
-    return LevelStatusBlock(application, start_group, levels)
+    return LevelStatusBlock(application, start_group, levels, group_count)
 
 
 def _validate_level(level: int) -> None:

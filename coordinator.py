@@ -131,7 +131,7 @@ class CBusCoordinator(DataUpdateCoordinator):
             len(blocks),
         )
         self.initial_sync_complete = False
-        self._initial_status_pending = set(blocks)
+        self._initial_status_pending = set(self.lighting_map)
         self._initial_status_event.clear()
 
         for start_group in blocks:
@@ -161,16 +161,17 @@ class CBusCoordinator(DataUpdateCoordinator):
                 )
             except TimeoutError:
                 _LOGGER.warning(
-                    "C-Bus Sync: Timed out waiting for exact level blocks: %s",
+                    "C-Bus Sync: Timed out waiting for configured groups: %s",
                     sorted(self._initial_status_pending),
                 )
 
         self.initial_sync_complete = True
         self.async_set_updated_data(dict(self.states))
         _LOGGER.info(
-            "C-Bus Sync: Startup live-state pass complete (%d/%d blocks received).",
-            len(blocks) - len(self._initial_status_pending),
-            len(blocks),
+            "C-Bus Sync: Startup live-state pass complete "
+            "(%d/%d configured groups covered).",
+            len(self.lighting_map) - len(self._initial_status_pending),
+            len(self.lighting_map),
         )
 
     async def disconnect(self):
@@ -336,7 +337,7 @@ class CBusCoordinator(DataUpdateCoordinator):
             _LOGGER.error("C-Bus MMI: Parsing failure: %s", err)
 
     def _process_level_status_response(self, line: str) -> bool:
-        """Apply one exact 32-group level-status response."""
+        """Apply one fragment of an exact 32-group level-status response."""
         block = parse_level_status_response(line)
         if block is None or block.application != LIGHTING_APPLICATION:
             return False
@@ -352,14 +353,21 @@ class CBusCoordinator(DataUpdateCoordinator):
             self.states[ga] = {"state": level > 0, "brightness": level}
             state_updated = True
 
-        self._initial_status_pending.discard(block.start_group)
+        fragment_end = block.start_group + block.group_count
+        self._initial_status_pending.difference_update(
+            {
+                ga
+                for ga in self._initial_status_pending
+                if block.start_group <= ga < fragment_end
+            }
+        )
         if not self._initial_status_pending:
             self._initial_status_event.set()
 
         if state_updated:
             self.async_set_updated_data(dict(self.states))
             _LOGGER.debug(
-                "C-Bus Sync: Applied exact level block starting at GA %d",
+                "C-Bus Sync: Applied exact level fragment starting at GA %d",
                 block.start_group,
             )
         return True

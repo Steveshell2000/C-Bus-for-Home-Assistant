@@ -168,6 +168,26 @@ class ProtocolTests(unittest.TestCase):
         assert block is not None
         self.assertEqual(block.levels, {0: 0, 1: 42, 2: 137, 3: 255})
 
+    def test_parse_captured_fragmented_level_status_replies(self) -> None:
+        captured = (
+            "G.G.F9073800000000000000556AAAAAAAAA0000AAAAAAAAAAAA000065",
+            "F907380BAAAA0000AAAA0000AAAA00000000AAAA55550000AAAA6F",
+            "F7073816AAAAAAAAAAAA0000AAAA0000000000000000000064",
+        )
+
+        fragments = [parse_level_status_response(frame) for frame in captured]
+
+        self.assertTrue(all(fragment is not None for fragment in fragments))
+        first, second, third = fragments
+        assert first is not None and second is not None and third is not None
+        self.assertEqual((first.start_group, first.group_count), (0, 11))
+        self.assertEqual((second.start_group, second.group_count), (11, 11))
+        self.assertEqual((third.start_group, third.group_count), (22, 10))
+        self.assertEqual(first.levels[3], 143)
+        self.assertEqual(first.levels[4], 0)
+        self.assertEqual(second.levels[19], 255)
+        self.assertEqual(third.levels[23], 0)
+
     def test_level_status_skips_invalid_pairs_and_bad_checksum(self) -> None:
         frame = _level_status_frame(0, [10, 20, 30])
         invalid_pair = frame[:20] + "00" + frame[22:]

@@ -198,6 +198,34 @@ class CoordinatorRampTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.coordinator._initial_status_pending)
         self.assertTrue(self.coordinator._initial_status_event.is_set())
 
+    async def test_captured_fragments_rebuild_on_partial_and_off_states(self) -> None:
+        coordinator = CBusCoordinator(
+            _FakeHass(),
+            "192.0.2.1",
+            10001,
+            {3: "Underbench", 4: "Kitchen", 19: "Dining", 23: "Off group"},
+        )
+        coordinator._initial_status_pending = {3, 4, 19, 23}
+        captured = (
+            "G.G.F9073800000000000000556AAAAAAAAA0000AAAAAAAAAAAA000065",
+            "F907380BAAAA0000AAAA0000AAAA00000000AAAA55550000AAAA6F",
+            "F7073816AAAAAAAAAAAA0000AAAA0000000000000000000064",
+        )
+
+        self.assertTrue(coordinator._process_level_status_response(captured[0]))
+        self.assertEqual(coordinator.states[3]["brightness"], 143)
+        self.assertEqual(coordinator.states[4]["brightness"], 0)
+        self.assertEqual(coordinator._initial_status_pending, {19, 23})
+
+        self.assertTrue(coordinator._process_level_status_response(captured[1]))
+        self.assertEqual(coordinator.states[19]["brightness"], 255)
+        self.assertEqual(coordinator._initial_status_pending, {23})
+
+        self.assertTrue(coordinator._process_level_status_response(captured[2]))
+        self.assertEqual(coordinator.states[23]["brightness"], 0)
+        self.assertFalse(coordinator._initial_status_pending)
+        self.assertTrue(coordinator._initial_status_event.is_set())
+
     async def test_startup_sync_requests_only_needed_status_blocks(self) -> None:
         coordinator = CBusCoordinator(
             _FakeHass(),
