@@ -6,9 +6,11 @@ from homeassistant.components.light import (
     LightEntityFeature,
 )
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import STATE_OFF, STATE_ON
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import DOMAIN
@@ -31,7 +33,7 @@ async def async_setup_entry(
     )
 
 
-class CBusLightEntity(CoordinatorEntity, LightEntity):
+class CBusLightEntity(CoordinatorEntity, RestoreEntity, LightEntity):
     """Representation of a C-Bus Lighting group with native ramp support."""
 
     def __init__(self, coordinator, ga, name, entry: ConfigEntry):
@@ -45,6 +47,29 @@ class CBusLightEntity(CoordinatorEntity, LightEntity):
         self._attr_supported_color_modes = {ColorMode.BRIGHTNESS}
         self._attr_color_mode = ColorMode.BRIGHTNESS
         self._attr_supported_features = LightEntityFeature.TRANSITION
+
+    async def async_added_to_hass(self) -> None:
+        """Restore groups that did not provide live C-Bus startup feedback."""
+        if self.ga in self.coordinator.assumed_state_groups:
+            last_state = await self.async_get_last_state()
+            if last_state is not None:
+                if last_state.state == STATE_ON:
+                    brightness = last_state.attributes.get(ATTR_BRIGHTNESS, 255)
+                    if not isinstance(brightness, (int, float)):
+                        brightness = 255
+                elif last_state.state == STATE_OFF:
+                    brightness = 0
+                else:
+                    brightness = None
+                if brightness is not None:
+                    self.coordinator.restore_assumed_level(self.ga, brightness)
+
+        await super().async_added_to_hass()
+
+    @property
+    def assumed_state(self) -> bool:
+        """Return whether the group lacks authoritative output-unit feedback."""
+        return self.ga in self.coordinator.assumed_state_groups
 
     @property
     def device_info(self) -> DeviceInfo:

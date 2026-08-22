@@ -10,6 +10,7 @@ A lightweight, native Home Assistant integration for Clipsal C-Bus home automati
 * **Native C-Bus ramps:** Supports the documented ramp rates, explicit Home Assistant transitions, and smooth slider state updates while a ramp is running without losing the terminal level to delayed MMI feedback.
 * **Editable default ramp:** Home Assistant lighting commands use a 4-second ramp by default. Change it from the integration's **Configure** page, or set it to `0` for instantaneous control.
 * **Connection hardening:** Includes heartbeat and an exact-level startup sync in 32-group C-Bus blocks, completed before Home Assistant exposes the entities.
+* **Legacy gateway state:** If a group does not answer the startup level request, as occurs with the one-way 5500DAL DALI gateway, the entity restores its last observed Home Assistant level as assumed state. Any later C-Bus command or valid output-unit status replaces it immediately.
 * **Graceful lifecycle management:** Disconnects background tasks and the socket cleanly when the entry unloads or reloads.
 
 ## Directory structure

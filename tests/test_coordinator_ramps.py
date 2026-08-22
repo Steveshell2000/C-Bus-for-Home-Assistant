@@ -197,6 +197,40 @@ class CoordinatorRampTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(self.coordinator._initial_status_pending)
         self.assertTrue(self.coordinator._initial_status_event.is_set())
+        self.assertNotIn(1, self.coordinator.assumed_state_groups)
+
+    async def test_invalid_gateway_level_remains_unanswered(self) -> None:
+        self.coordinator._initial_status_pending = {1}
+        frame = _level_status_frame(0, [10, 20, 30])
+        invalid_pair = frame[:20] + "00" + frame[22:]
+        invalid_pair = (
+            invalid_pair[:-2]
+            + protocol_module.calculate_cbus_checksum(invalid_pair[:-2])
+        )
+
+        self.assertTrue(
+            self.coordinator._process_level_status_response(invalid_pair)
+        )
+
+        self.assertEqual(self.coordinator._initial_status_pending, {1})
+        self.assertIn(1, self.coordinator.assumed_state_groups)
+        self.assertFalse(self.coordinator._initial_status_event.is_set())
+
+    async def test_restored_gateway_level_yields_to_live_event(self) -> None:
+        self.assertTrue(self.coordinator.restore_assumed_level(1, 129))
+        self.assertEqual(
+            self.coordinator.states[1], {"state": True, "brightness": 129}
+        )
+        self.assertIn(1, self.coordinator.assumed_state_groups)
+
+        off = _received_frame(0x05, 0x23, 0x38, 0x00, 0x01, 0x01)
+        self.assertTrue(self.coordinator._process_event_update(off))
+
+        self.assertEqual(
+            self.coordinator.states[1], {"state": False, "brightness": 0}
+        )
+        self.assertNotIn(1, self.coordinator.assumed_state_groups)
+        self.assertFalse(self.coordinator.restore_assumed_level(1, 129))
 
     async def test_captured_fragments_rebuild_on_partial_and_off_states(self) -> None:
         coordinator = CBusCoordinator(

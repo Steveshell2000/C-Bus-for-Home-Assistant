@@ -52,6 +52,10 @@ class CBusCoordinator(DataUpdateCoordinator):
 
         # Internal state cache for all tracked group addresses.
         self.states = {ga: {"state": False, "brightness": 0} for ga in lighting_map}
+        # Native C-Bus output units answer MMI/level-status requests, but older
+        # one-way gateways such as the 5500DAL do not. Until a group is seen in
+        # live C-Bus traffic, expose any restored HA value as assumed state.
+        self.assumed_state_groups: set[int] = set(lighting_map)
 
         # C-Bus reports a ramp's destination and full-scale rate, but not each
         # intermediate level. Track active ramps so HA slider state follows the
@@ -326,6 +330,7 @@ class CBusCoordinator(DataUpdateCoordinator):
                     self.states[ga].update(
                         {"state": is_on, "brightness": new_brightness}
                     )
+                    self.assumed_state_groups.discard(ga)
                     state_updated = True
 
             if state_updated:
@@ -351,15 +356,11 @@ class CBusCoordinator(DataUpdateCoordinator):
             ):
                 continue
             self.states[ga] = {"state": level > 0, "brightness": level}
+            self.assumed_state_groups.discard(ga)
             state_updated = True
 
-        fragment_end = block.start_group + block.group_count
         self._initial_status_pending.difference_update(
-            {
-                ga
-                for ga in self._initial_status_pending
-                if block.start_group <= ga < fragment_end
-            }
+            self._initial_status_pending.intersection(block.levels)
         )
         if not self._initial_status_pending:
             self._initial_status_event.set()
@@ -379,6 +380,7 @@ class CBusCoordinator(DataUpdateCoordinator):
             return False
 
         ga = event.group_address
+        self.assumed_state_groups.discard(ga)
         if event.command == "terminate":
             level = self._estimated_ramp_level(ga)
             self._cancel_ramp(ga)
@@ -505,7 +507,21 @@ class CBusCoordinator(DataUpdateCoordinator):
         """Publish one clamped group level through DataUpdateCoordinator."""
         level = max(0, min(255, round(brightness)))
         self.states[ga] = {"state": level > 0, "brightness": level}
+        self.assumed_state_groups.discard(ga)
         self.async_set_updated_data(dict(self.states))
+
+    def restore_assumed_level(self, ga: int, brightness: int) -> bool:
+        """Restore an unanswered group's last HA level without claiming feedback."""
+        if ga not in self.states or ga not in self.assumed_state_groups:
+            return False
+
+        level = max(0, min(255, round(brightness)))
+        self.states[ga] = {"state": level > 0, "brightness": level}
+        self.async_set_updated_data(dict(self.states))
+        _LOGGER.debug(
+            "C-Bus Restore: GA %d restored to %d as assumed state", ga, level
+        )
+        return True
 
     async def send_command(
         self,
